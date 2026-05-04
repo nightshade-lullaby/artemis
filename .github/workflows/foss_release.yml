@@ -33,6 +33,25 @@ jobs:
           echo "upstream_tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Target upstream tag: $TAG"
 
+      - name: Fetch upstream changelog
+        if: steps.check.outputs.skip != 'true'
+        id: changelog
+        run: |
+          TAG="${{ steps.tag.outputs.upstream_tag }}"
+
+          CHANGELOG=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/tags/$TAG" \
+            | jq -r '.body')
+
+          if [ "$CHANGELOG" = "null" ] || [ -z "$CHANGELOG" ]; then
+            CHANGELOG="*No changelogs were provided by upstream.*"
+          fi
+
+          echo "changelog<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$CHANGELOG" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
       - name: Check if release already exists
         id: check
         run: |
@@ -154,7 +173,7 @@ jobs:
           tag_name: ${{ steps.apk.outputs.release_tag }}
           name: "${{ steps.tag.outputs.upstream_tag }}"
           body: |
-            PLACEHOLDER_THIS_IS_WHERE_THECHANGLELOGFROMUPSTREAMWILLBEDISPLAYED
+            ${{ steps.changelog.outputs.changelog }}
           files: ${{ steps.apk.outputs.apk_path }}
           draft: false
           prerelease: false
