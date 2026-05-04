@@ -130,12 +130,16 @@ jobs:
       - name: Create signing properties
         if: steps.check.outputs.skip != 'true'
         run: |
-          mkdir -p signing
-          printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
-          "$KEYSTORE_PASSWORD" "$KEYSTORE_ALIAS" "$KEY_PASSWORD" \
-          > signing/release.properties
+         mkdir -p signing
+         printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+         "${{ github.workspace }}/release.keystore" "$KEYSTORE_PASSWORD" "$KEYSTORE_ALIAS" "$KEY_PASSWORD" \
+         > signing/release.properties
 
-          cp signing/release.properties signing/legacy.properties
+         cp signing/release.properties signing/legacy.properties
+        env:
+         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+         KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
+         KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
       - name: Create secrets.properties
         if: steps.check.outputs.skip != 'true'
