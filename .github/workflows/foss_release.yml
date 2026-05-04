@@ -1,0 +1,167 @@
+name: FOSS Release Build
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream tag to build (leave empty to auto-detect latest)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: theothernt/AerialViews
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Determine upstream tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.upstream_tag }}" ]; then
+            TAG="${{ github.event.inputs.upstream_tag }}"
+          else
+            TAG=$(curl -s "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest" \
+              | jq -r '.tag_name')
+          fi
+          echo "upstream_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Target upstream tag: $TAG"
+
+      - name: Check if release already exists
+        id: check
+        run: |
+          RELEASE_TAG="${{ steps.tag.outputs.upstream_tag }}"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}")
+          if [ "$STATUS" = "200" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Release $RELEASE_TAG already exists — skipping."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Release $RELEASE_TAG not found — will build."
+          fi
+
+      - name: Checkout upstream source
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ steps.tag.outputs.upstream_tag }}
+          fetch-depth: 0
+
+      - name: Strip proprietary libraries
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          echo "Removing google-services.json..."
+          rm -f app/google-services.json
+
+          echo "Removing common (proprietary) FirebaseHelper..."
+          rm -rf app/src/common/
+
+          echo "Removing Firebase / Google Services plugin references from root build.gradle.kts..."
+          # Comment out the google-services & firebase plugins in root build.gradle.kts
+          sed -i 's|alias(libs.plugins.google.services) apply false|// alias(libs.plugins.google.services) apply false  // STRIPPED|g' build.gradle.kts
+          sed -i 's|alias(libs.plugins.firebase.crashlytics) apply false|// alias(libs.plugins.firebase.crashlytics) apply false  // STRIPPED|g' build.gradle.kts
+          sed -i 's|alias(libs.plugins.firebase.perf) apply false|// alias(libs.plugins.firebase.perf) apply false  // STRIPPED|g' build.gradle.kts
+
+          echo "Removing Firebase / Google Services plugin references from app build.gradle.kts..."
+          sed -i 's|alias(libs.plugins.google.services)|// alias(libs.plugins.google.services)  // STRIPPED|g' app/build.gradle.kts
+          sed -i 's|alias(libs.plugins.firebase.crashlytics)|// alias(libs.plugins.firebase.crashlytics)  // STRIPPED|g' app/build.gradle.kts
+          sed -i 's|alias(libs.plugins.firebase.perf)|// alias(libs.plugins.firebase.perf)  // STRIPPED|g' app/build.gradle.kts
+
+          echo "Removing Firebase dependency block from app build.gradle.kts..."
+          # Remove the Firebase flavor-specific dependency lines precisely
+          sed -i '/\/\/ Support all favors except F-Droid/d' app/build.gradle.kts
+          sed -i '/firebaseFlavors/d' app/build.gradle.kts
+          sed -i '/firebase\.bom/d' app/build.gradle.kts
+          sed -i '/bundles\.firebase/d' app/build.gradle.kts
+
+          echo "Disabling analytics/crashlytics/perf manifest placeholders in release build type..."
+          sed -i 's|manifestPlaceholders\["analyticsCollectionEnabled"\] = true|manifestPlaceholders["analyticsCollectionEnabled"] = false|g' app/build.gradle.kts
+          sed -i 's|manifestPlaceholders\["crashlyticsCollectionEnabled"\] = true|manifestPlaceholders["crashlyticsCollectionEnabled"] = false|g' app/build.gradle.kts
+          sed -i 's|manifestPlaceholders\["performanceCollectionEnabled"\] = true|manifestPlaceholders["performanceCollectionEnabled"] = false|g' app/build.gradle.kts
+
+          echo "Proprietary components stripped."
+
+      - name: Set up JDK 21
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        if: steps.check.outputs.skip != 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          validate-wrappers: false
+
+      - name: Decode keystore
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > ${{ github.workspace }}/release.keystore
+
+      - name: Create signing properties
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          mkdir -p signing
+          cat > signing/release.properties << EOF
+          storeFile=${{ github.workspace }}/release.keystore
+          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
+          keyAlias=${{ secrets.KEY_ALIAS }}
+          keyPassword=${{ secrets.KEY_PASSWORD }}
+          EOF
+
+          cp signing/release.properties signing/legacy.properties
+
+      - name: Create secrets.properties
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cat > secrets.properties << EOF
+          openWeather=
+          openWeatherDebug=
+          EOF
+
+      - name: Build FOSS Release APK
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleFOSSRelease --no-daemon --stacktrace
+
+      - name: Prepare APK artifact
+        if: steps.check.outputs.skip != 'true'
+        id: apk
+        run: |
+          APK_PATH=$(find app/build/outputs/apk/foss/release -name "*.apk" | head -1)
+          RELEASE_TAG="${{ steps.tag.outputs.upstream_tag }}"
+          APK_NAME="com.neilturner.aerialviews_${RELEASE_TAG}.apk"
+          cp "$APK_PATH" "$APK_NAME"
+          echo "apk_path=$APK_NAME" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "APK ready: $APK_NAME"
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.apk.outputs.release_tag }}
+          name: "${{ steps.tag.outputs.upstream_tag }}"
+          body: |
+            PLACEHOLDER_THIS_IS_WHERE_THECHANGLELOGFROMUPSTREAMWILLBEDISPLAYED
+          files: ${{ steps.apk.outputs.apk_path }}
+          draft: false
+          prerelease: false
+
+      - name: Cleanup keystore
+        if: always()
+        run: |
+          rm -f ${{ github.workspace }}/release.keystore
+          rm -f signing/release.properties
+          rm -f signing/legacy.properties
