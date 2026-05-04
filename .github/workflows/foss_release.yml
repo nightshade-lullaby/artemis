@@ -158,7 +158,7 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         id: apk
         run: |
-          APK_PATH=$(find app/build/outputs/apk/foss/release -name "*.apk" | head -1)
+          APK_PATH=$(find app/build/outputs/apk/fdroid/release -name "*.apk" | head -1)
           RELEASE_TAG="${{ steps.tag.outputs.upstream_tag }}"
           APK_NAME="com.neilturner.aerialviews_${RELEASE_TAG}.apk"
           cp "$APK_PATH" "$APK_NAME"
