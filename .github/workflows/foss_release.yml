@@ -132,7 +132,7 @@ jobs:
         run: |
           mkdir -p signing
           printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
-          "$KEYSTORE_PATH" "$KS_PASSWORD" "$KS_ALIAS" "$KS_KEY_PASSWORD" \
+          "$KEYSTORE_PASSWORD" "$KEYSTORE_ALIAS" "$KEY_PASSWORD" \
           > signing/release.properties
 
           cp signing/release.properties signing/legacy.properties
