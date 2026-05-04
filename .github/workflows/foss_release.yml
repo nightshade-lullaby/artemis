@@ -152,7 +152,7 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         run: |
           chmod +x gradlew
-          ./gradlew assembleFOSSRelease --no-daemon --stacktrace
+          ./gradlew assembleFdroidRelease --no-daemon --stacktrace
 
       - name: Prepare APK artifact
         if: steps.check.outputs.skip != 'true'
