@@ -145,9 +145,11 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         run: |
           cat > secrets.properties << EOF
-          openWeather=
-          openWeatherDebug=
+          openWeather=${OPENWEATHER_API_KEY}
+          openWeatherDebug=${OPENWEATHER_API_KEY}
           EOF
+        env:
+          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
 
       - name: Build FOSS Release APK
         if: steps.check.outputs.skip != 'true'
