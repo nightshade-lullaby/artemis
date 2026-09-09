@@ -1,6 +1,5 @@
-![GitHub Actions](https://img.shields.io/github/actions/workflow/status/nightshade-lullaby/artemis/.github/workflows/foss_release.yml)
+[![build](https://github.com/nightshade-lullaby/artemis/actions/workflows/foss_release.yml/badge.svg)](https://github.com/nightshade-lullaby/artemis/actions/workflows/foss_release.yml)
 ![Latest Release](https://img.shields.io/github/v/release/nightshade-lullaby/artemis?display_name=tag)
-![License](https://img.shields.io/github/license/nightshade-lullaby/artemis)
 
 ---
 
