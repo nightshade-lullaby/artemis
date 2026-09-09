@@ -1,5 +1,6 @@
 [![build](https://github.com/nightshade-lullaby/artemis/actions/workflows/foss_release.yml/badge.svg)](https://github.com/nightshade-lullaby/artemis/actions/workflows/foss_release.yml)
-![Latest Release](https://img.shields.io/github/v/release/nightshade-lullaby/artemis?display_name=tag)
+![FOSS Release](https://img.shields.io/github/v/release/nightshade-lullaby/artemis?color=blue)
+![Upstream Release](https://img.shields.io/github/v/release/theothernt/AerialViews?label=upstream&color=orange)
 
 ---
 
