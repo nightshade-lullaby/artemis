@@ -1,14 +1,12 @@
 name: FOSS Release Build
 
 on:
-  #schedule:
-    #- cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
       upstream_tag:
-        description: 'Upstream tag to build (leave empty to auto-detect latest)'
+        description: "Upstream tag to build (leave empty to auto-detect latest)"
         required: false
-        default: ''
+        default: ""
 
 permissions:
   contents: write
@@ -21,51 +19,90 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ------------------------------------------------------------------
+      # Determine upstream release
+      # ------------------------------------------------------------------
+
       - name: Determine upstream tag
         id: tag
+        shell: bash
         run: |
+          set -euo pipefail
+
           if [ -n "${{ github.event.inputs.upstream_tag }}" ]; then
             TAG="${{ github.event.inputs.upstream_tag }}"
           else
-            TAG=$(curl -s "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest" \
-              | jq -r '.tag_name')
+            TAG="$(
+              curl -fsSL \
+                "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" |
+              jq -er '.tag_name'
+            )"
           fi
+
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "::error::Could not determine upstream release tag."
+            exit 1
+          fi
+
           echo "upstream_tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Target upstream tag: $TAG"
+
+      - name: Check if release already exists
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RELEASE_TAG="${{ steps.tag.outputs.upstream_tag }}"
+
+          STATUS="$(
+            curl -sS \
+              -o /dev/null \
+              -w "%{http_code}" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}"
+          )"
+
+          if [ "$STATUS" = "200" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Release $RELEASE_TAG already exists — skipping."
+          elif [ "$STATUS" = "404" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Release $RELEASE_TAG does not exist — will build."
+          else
+            echo "::error::GitHub API returned HTTP $STATUS while checking release."
+            exit 1
+          fi
 
       - name: Fetch upstream changelog
         if: steps.check.outputs.skip != 'true'
         id: changelog
+        shell: bash
         run: |
+          set -euo pipefail
+
           TAG="${{ steps.tag.outputs.upstream_tag }}"
 
-          CHANGELOG=$(curl -s \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/tags/$TAG" \
-            | jq -r '.body')
+          CHANGELOG="$(
+            curl -fsSL \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${UPSTREAM_REPO}/releases/tags/${TAG}" |
+            jq -r '.body // empty'
+          )"
 
-          if [ "$CHANGELOG" = "null" ] || [ -z "$CHANGELOG" ]; then
-            CHANGELOG="*No changelogs were provided by upstream.*"
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="*No changelog was provided by upstream.*"
           fi
 
-          echo "changelog<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$CHANGELOG" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "changelog<<EOF"
+            echo "$CHANGELOG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Check if release already exists
-        id: check
-        run: |
-          RELEASE_TAG="${{ steps.tag.outputs.upstream_tag }}"
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}")
-          if [ "$STATUS" = "200" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Release $RELEASE_TAG already exists — skipping."
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "Release $RELEASE_TAG not found — will build."
-          fi
+      # ------------------------------------------------------------------
+      # Checkout upstream
+      # ------------------------------------------------------------------
 
       - name: Checkout upstream source
         if: steps.check.outputs.skip != 'true'
@@ -75,46 +112,291 @@ jobs:
           ref: ${{ steps.tag.outputs.upstream_tag }}
           fetch-depth: 0
 
-      - name: Strip proprietary libraries
+      # ------------------------------------------------------------------
+      # Inspect upstream build configuration
+      # ------------------------------------------------------------------
+
+      - name: Inspect upstream build configuration
         if: steps.check.outputs.skip != 'true'
+        shell: bash
         run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "Gradle wrapper"
+          echo "============================================================"
+
+          grep '^distributionUrl=' \
+            gradle/wrapper/gradle-wrapper.properties || true
+
+          echo
+          echo "============================================================"
+          echo "Version catalog"
+          echo "============================================================"
+
+          grep -E \
+            '^(agp|kotlin|ksp|firebase-bom|google-services|firebase-crashlytics-plugin|firebase-perf-plugin)[[:space:]]*=' \
+            gradle/libs.versions.toml || true
+
+          echo
+          echo "============================================================"
+          echo "F-Droid flavor"
+          echo "============================================================"
+
+          grep -n -A12 -B4 \
+            'create("fdroid")' \
+            app/build.gradle.kts || true
+
+      # ------------------------------------------------------------------
+      # Strip proprietary integrations
+      #
+      # Keep this deliberately narrow. If upstream changes the relevant
+      # Gradle structure, fail rather than silently generating bad Kotlin.
+      # ------------------------------------------------------------------
+
+      - name: Strip proprietary components
+        if: steps.check.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
           echo "Removing google-services.json..."
           rm -f app/google-services.json
 
-          echo "Removing common (proprietary) FirebaseHelper..."
-          rm -rf app/src/common/
+          # --------------------------------------------------------------
+          # Remove/disable proprietary Gradle plugins.
+          # --------------------------------------------------------------
 
-          echo "Removing Firebase / Google Services plugin references from root build.gradle.kts..."
-          # Comment out the google-services & firebase plugins in root build.gradle.kts
-          sed -i 's|alias(libs.plugins.google.services) apply false|// alias(libs.plugins.google.services) apply false  // STRIPPED|g' build.gradle.kts
-          sed -i 's|alias(libs.plugins.firebase.crashlytics) apply false|// alias(libs.plugins.firebase.crashlytics) apply false  // STRIPPED|g' build.gradle.kts
-          sed -i 's|alias(libs.plugins.firebase.perf) apply false|// alias(libs.plugins.firebase.perf) apply false  // STRIPPED|g' build.gradle.kts
+          echo "Removing proprietary Gradle plugin references..."
 
-          echo "Removing Firebase / Google Services plugin references from app build.gradle.kts..."
-          sed -i 's|alias(libs.plugins.google.services)|// alias(libs.plugins.google.services)  // STRIPPED|g' app/build.gradle.kts
-          sed -i 's|alias(libs.plugins.firebase.crashlytics)|// alias(libs.plugins.firebase.crashlytics)  // STRIPPED|g' app/build.gradle.kts
-          sed -i 's|alias(libs.plugins.firebase.perf)|// alias(libs.plugins.firebase.perf)  // STRIPPED|g' app/build.gradle.kts
+          python3 <<'PY'
+          from pathlib import Path
 
-          echo "Removing Firebase dependency block from app build.gradle.kts..."
-          # Remove the Firebase flavor-specific dependency lines precisely
-          sed -i '/\/\/ Support all favors except F-Droid/d' app/build.gradle.kts
-          sed -i '/firebaseFlavors/d' app/build.gradle.kts
-          sed -i '/firebase\.bom/d' app/build.gradle.kts
-          sed -i '/bundles\.firebase/d' app/build.gradle.kts
+          files = [
+              Path("build.gradle.kts"),
+              Path("app/build.gradle.kts"),
+          ]
 
-          echo "Disabling analytics/crashlytics/perf manifest placeholders in release build type..."
-          sed -i 's|manifestPlaceholders\["analyticsCollectionEnabled"\] = true|manifestPlaceholders["analyticsCollectionEnabled"] = false|g' app/build.gradle.kts
-          sed -i 's|manifestPlaceholders\["crashlyticsCollectionEnabled"\] = true|manifestPlaceholders["crashlyticsCollectionEnabled"] = false|g' app/build.gradle.kts
-          sed -i 's|manifestPlaceholders\["performanceCollectionEnabled"\] = true|manifestPlaceholders["performanceCollectionEnabled"] = false|g' app/build.gradle.kts
+          patterns = [
+              "alias(libs.plugins.google.services)",
+              "alias(libs.plugins.firebase.crashlytics)",
+              "alias(libs.plugins.firebase.perf)",
+          ]
 
+          for path in files:
+              text = path.read_text()
+
+              for pattern in patterns:
+                  if pattern in text:
+                      text = text.replace(
+                          pattern,
+                          f"// {pattern} // STRIPPED"
+                      )
+
+              path.write_text(text)
+          PY
+
+          # --------------------------------------------------------------
+          # Remove Firebase dependencies.
+          #
+          # Newer upstream versions use:
+          #
+          # val firebaseFlavors = listOf(
+          #     "github", "beta", "googleplay", "googleplaybeta", "amazon"
+          # )
+          #
+          # firebaseFlavors.forEach { flavor ->
+          #     "${flavor}Implementation"(platform(libs.firebase.bom))
+          #     "${flavor}Implementation"(libs.bundles.firebase)
+          # }
+          #
+          # We remove the complete construct, not individual lines.
+          # --------------------------------------------------------------
+
+          echo "Removing Firebase flavor dependency block..."
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("app/build.gradle.kts")
+          text = path.read_text()
+
+          # Newer upstream structure.
+          pattern = re.compile(
+              r'''
+              (?ms)
+              ^[ \t]*val[ \t]+firebaseFlavors[ \t]*=[ \t]*listOf\(
+              .*?
+              ^[ \t]*firebaseFlavors\.forEach[ \t]*\{[ \t]*flavor[ \t]*->
+              .*?
+              ^[ \t]*\}
+              [ \t]*$
+              '''
+          )
+
+          match = pattern.search(text)
+
+          if match:
+              print("Found newer firebaseFlavors dependency block.")
+              text = text[:match.start()] + text[match.end():]
+          else:
+              # Older upstream structure.
+              old_patterns = [
+                  r'^[ \t]*"githubImplementation"\(libs\.bundles\.firebase\)[ \t]*\n?',
+                  r'^[ \t]*"betaImplementation"\(libs\.bundles\.firebase\)[ \t]*\n?',
+                  r'^[ \t]*"googleplayImplementation"\(libs\.bundles\.firebase\)[ \t]*\n?',
+                  r'^[ \t]*"googleplaybetaImplementation"\(libs\.bundles\.firebase\)[ \t]*\n?',
+                  r'^[ \t]*"amazonImplementation"\(libs\.bundles\.firebase\)[ \t]*\n?',
+              ]
+
+              found_old = False
+
+              for old_pattern in old_patterns:
+                  if re.search(old_pattern, text, flags=re.MULTILINE):
+                      found_old = True
+                      text = re.sub(
+                          old_pattern,
+                          "",
+                          text,
+                          flags=re.MULTILINE
+                      )
+
+              if found_old:
+                  print("Found older Firebase dependency structure.")
+              else:
+                  print(
+                      "::warning::No known Firebase dependency block was found."
+                  )
+
+          path.write_text(text)
+          PY
+
+          # --------------------------------------------------------------
+          # Disable Firebase collection in release builds.
+          # --------------------------------------------------------------
+
+          echo "Disabling Firebase collection..."
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("app/build.gradle.kts")
+          text = path.read_text()
+
+          replacements = {
+              'manifestPlaceholders["analyticsCollectionEnabled"] = true':
+              'manifestPlaceholders["analyticsCollectionEnabled"] = false',
+
+              'manifestPlaceholders["crashlyticsCollectionEnabled"] = true':
+              'manifestPlaceholders["crashlyticsCollectionEnabled"] = false',
+
+              'manifestPlaceholders["performanceCollectionEnabled"] = true':
+              'manifestPlaceholders["performanceCollectionEnabled"] = false',
+          }
+
+          for old, new in replacements.items():
+              if old in text:
+                  text = text.replace(old, new)
+
+          path.write_text(text)
+          PY
+
+          # --------------------------------------------------------------
+          # Show what remains. This is diagnostic only; the F-Droid source
+          # tree may legitimately contain FirebaseHelper references.
+          # --------------------------------------------------------------
+
+          echo
+          echo "============================================================"
+          echo "Remaining Firebase/Google references in Gradle files"
+          echo "============================================================"
+
+          grep -RniE \
+            'firebase|google\.services|crashlytics|performance' \
+            build.gradle.kts \
+            app/build.gradle.kts \
+            || true
+
+          echo
           echo "Proprietary components stripped."
+
+      # ------------------------------------------------------------------
+      # Configure ABI splits
+      # ------------------------------------------------------------------
+
+      - name: Configure ABI splits
+        if: steps.check.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("app/build.gradle.kts")
+          text = path.read_text()
+
+          marker = "android {"
+
+          if marker not in text:
+              raise SystemExit(
+                  "::error::Could not find 'android {' in app/build.gradle.kts"
+              )
+
+          # Do not add the configuration twice if the workflow is ever
+          # adapted to work from a pre-patched checkout.
+          if "isUniversalApk = true" in text:
+              print("ABI split configuration already exists; leaving it unchanged.")
+          else:
+              abi_config = '''
+              // FOSS release: generate architecture-specific APKs
+              // plus a universal APK.
+              splits {
+                  abi {
+                      isEnable = true
+                      reset()
+                      include(
+                          "armeabi-v7a",
+                          "arm64-v8a",
+                          "x86",
+                          "x86_64"
+                      )
+                      isUniversalApk = true
+                  }
+              }
+
+              '''
+
+              text = text.replace(
+                  marker,
+                  marker + "\n" + abi_config,
+                  1
+              )
+
+              path.write_text(text)
+
+              print("Added ABI split configuration.")
+          PY
+
+          echo
+          echo "ABI targets:"
+          echo "  - armeabi-v7a"
+          echo "  - arm64-v8a"
+          echo "  - x86"
+          echo "  - x86_64"
+          echo "  - universal"
+
+      # ------------------------------------------------------------------
+      # Java / Gradle
+      # ------------------------------------------------------------------
 
       - name: Set up JDK 21
         if: steps.check.outputs.skip != 'true'
         uses: actions/setup-java@v5
         with:
-          java-version: '21'
-          distribution: 'temurin'
+          java-version: "21"
+          distribution: "temurin"
 
       - name: Setup Gradle
         if: steps.check.outputs.skip != 'true'
@@ -122,52 +404,217 @@ jobs:
         with:
           validate-wrappers: false
 
+      # ------------------------------------------------------------------
+      # Signing
+      # ------------------------------------------------------------------
+
       - name: Decode keystore
         if: steps.check.outputs.skip != 'true'
+        shell: bash
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > ${{ github.workspace }}/release.keystore
+          set -euo pipefail
+
+          echo "${{ secrets.KEYSTORE_BASE64 }}" |
+            base64 -d > "${{ github.workspace }}/release.keystore"
 
       - name: Create signing properties
         if: steps.check.outputs.skip != 'true'
+        shell: bash
         run: |
-         mkdir -p signing
-         printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
-         "${{ github.workspace }}/release.keystore" "$KEYSTORE_PASSWORD" "$KEYSTORE_ALIAS" "$KEY_PASSWORD" \
-         > signing/release.properties
+          set -euo pipefail
 
-         cp signing/release.properties signing/legacy.properties
+          mkdir -p signing
+
+          printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "${{ github.workspace }}/release.keystore" \
+            "$KEYSTORE_PASSWORD" \
+            "$KEYSTORE_ALIAS" \
+            "$KEY_PASSWORD" \
+            > signing/release.properties
+
+          cp signing/release.properties signing/legacy.properties
         env:
-         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-         KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
-         KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
       - name: Create secrets.properties
         if: steps.check.outputs.skip != 'true'
+        shell: bash
         run: |
-          cat > secrets.properties << EOF
+          set -euo pipefail
+
+          cat > secrets.properties <<EOF
           openWeather=${OPENWEATHER_API_KEY}
           openWeatherDebug=${OPENWEATHER_API_KEY}
           EOF
         env:
           OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
 
-      - name: Build FOSS Release APK
-        if: steps.check.outputs.skip != 'true'
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleFdroidRelease --no-daemon --stacktrace
+      # ------------------------------------------------------------------
+      # Validate Gradle configuration
+      # ------------------------------------------------------------------
 
-      - name: Prepare APK artifact
+      - name: Verify Gradle configuration
+        if: steps.check.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          chmod +x gradlew
+
+          ./gradlew \
+            :app:tasks \
+            --no-daemon \
+            --stacktrace
+
+      # ------------------------------------------------------------------
+      # Build
+      # ------------------------------------------------------------------
+
+      - name: Build FOSS Release APKs
+        if: steps.check.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew \
+            :app:assembleFdroidRelease \
+            --no-daemon \
+            --stacktrace
+
+      # ------------------------------------------------------------------
+      # Collect APKs
+      # ------------------------------------------------------------------
+
+      - name: Prepare APK artifacts
         if: steps.check.outputs.skip != 'true'
         id: apk
+        shell: bash
         run: |
-          APK_PATH=$(find app/build/outputs/apk/fdroid/release -name "*.apk" | head -1)
+          set -euo pipefail
+
           RELEASE_TAG="${{ steps.tag.outputs.upstream_tag }}"
-          APK_NAME="com.neilturner.aerialviews_${RELEASE_TAG}.apk"
-          cp "$APK_PATH" "$APK_NAME"
-          echo "apk_path=$APK_NAME" >> "$GITHUB_OUTPUT"
+          OUTPUT_DIR="app/build/outputs/apk"
+          RELEASE_DIR="release-apks"
+
+          mkdir -p "$RELEASE_DIR"
+
+          echo "============================================================"
+          echo "APK files produced by Gradle"
+          echo "============================================================"
+
+          find "$OUTPUT_DIR" \
+            -type f \
+            -name "*.apk" \
+            -print \
+            | sort
+
+          echo
+
+          # Find the actual APKs rather than relying on AGP's exact
+          # output directory/naming convention.
+
+          ARM64="$(
+            find "$OUTPUT_DIR" \
+              -type f \
+              -name "*.apk" \
+              -iname "*arm64-v8a*" |
+            head -n 1
+          )"
+
+          ARM32="$(
+            find "$OUTPUT_DIR" \
+              -type f \
+              -name "*.apk" \
+              -iname "*armeabi-v7a*" |
+            head -n 1
+          )"
+
+          X86="$(
+            find "$OUTPUT_DIR" \
+              -type f \
+              -name "*.apk" \
+              -iname "*x86*" \
+              ! -iname "*x86_64*" |
+            head -n 1
+          )"
+
+          X86_64="$(
+            find "$OUTPUT_DIR" \
+              -type f \
+              -name "*.apk" \
+              -iname "*x86_64*" |
+            head -n 1
+          )"
+
+          UNIVERSAL="$(
+            find "$OUTPUT_DIR" \
+              -type f \
+              -name "*.apk" \
+              -iname "*universal*" |
+            head -n 1
+          )"
+
+          FAILED=0
+
+          check_apk() {
+            local name="$1"
+            local path="$2"
+
+            if [ -z "$path" ]; then
+              echo "::error::Could not find $name APK."
+              FAILED=1
+            else
+              echo "Found $name: $path"
+            fi
+          }
+
+          check_apk "arm64-v8a" "$ARM64"
+          check_apk "armeabi-v7a" "$ARM32"
+          check_apk "x86" "$X86"
+          check_apk "x86_64" "$X86_64"
+          check_apk "universal" "$UNIVERSAL"
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo
+            echo "::error::One or more expected APKs were not produced."
+            echo
+            echo "Complete APK output:"
+            find "$OUTPUT_DIR" \
+              -type f \
+              -name "*.apk" \
+              -print
+            exit 1
+          fi
+
+          cp "$ARM64" \
+            "$RELEASE_DIR/com.neilturner.aerialviews_${RELEASE_TAG}_arm64-v8a.apk"
+
+          cp "$ARM32" \
+            "$RELEASE_DIR/com.neilturner.aerialviews_${RELEASE_TAG}_armeabi-v7a.apk"
+
+          cp "$X86" \
+            "$RELEASE_DIR/com.neilturner.aerialviews_${RELEASE_TAG}_x86.apk"
+
+          cp "$X86_64" \
+            "$RELEASE_DIR/com.neilturner.aerialviews_${RELEASE_TAG}_x86_64.apk"
+
+          cp "$UNIVERSAL" \
+            "$RELEASE_DIR/com.neilturner.aerialviews_${RELEASE_TAG}_universal.apk"
+
+          echo
+          echo "============================================================"
+          echo "Release artifacts"
+          echo "============================================================"
+
+          ls -lh "$RELEASE_DIR"
+
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "APK ready: $APK_NAME"
+
+      # ------------------------------------------------------------------
+      # Create GitHub Release
+      # ------------------------------------------------------------------
 
       - name: Create GitHub Release
         if: steps.check.outputs.skip != 'true'
@@ -177,13 +624,19 @@ jobs:
           name: "${{ steps.tag.outputs.upstream_tag }}"
           body: |
             ${{ steps.changelog.outputs.changelog }}
-          files: ${{ steps.apk.outputs.apk_path }}
+          files: |
+            release-apks/*.apk
           draft: false
           prerelease: false
 
-      - name: Cleanup keystore
+      # ------------------------------------------------------------------
+      # Cleanup
+      # ------------------------------------------------------------------
+
+      - name: Cleanup secrets
         if: always()
+        shell: bash
         run: |
-          rm -f ${{ github.workspace }}/release.keystore
+          rm -f "${{ github.workspace }}/release.keystore"
           rm -f signing/release.properties
           rm -f signing/legacy.properties
