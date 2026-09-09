@@ -1,4 +1,4 @@
-name: FOSS Release Build
+name: build
 
 on:
   schedule:
