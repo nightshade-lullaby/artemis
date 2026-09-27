@@ -6,9 +6,9 @@
   </a>
 </p>
 
-[![Build Status](https://github.com/nightshade-lullaby/artemis/actions/workflows/foss_release.yml/badge.svg)](https://github.com/nightshade-lullaby/artemis/actions/workflows/foss_release.yml)
-[![FOSS Release Tag](https://img.shields.io/github/v/release/nightshade-lullaby/artemis?color=blue)](https://github.com/nightshade-lullaby/artemis/releases/latest)
-[![Upstream Release Tag](https://img.shields.io/github/v/release/theothernt/AerialViews?label=upstream&color=orange)](https://github.com/theothernt/AerialViews/releases/latest)
+[![Build status](https://img.shields.io/github/actions/workflow/status/nightshade-lullaby/artemis/.github/workflows/build.yml?logo=github)](https://github.com/nightshade-lullaby/artemis/actions/workflows/build.yml)
+[![Downstream release tag](https://img.shields.io/github/v/release/nightshade-lullaby/artemis?color=75788C)](https://github.com/nightshade-lullaby/artemis/releases/latest)
+[![Upstream release tag](https://img.shields.io/github/v/release/theothernt/AerialViews?label=upstream)](https://github.com/theothernt/AerialViews/releases/latest)
 
 ---
 
