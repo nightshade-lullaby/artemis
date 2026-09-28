@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       upstream_tag:
-        description: "Upstream tag to build (leave empty to auto-detect latest)"
+        description: "Upstream tag to build (leave empty for latest)"
         required: false
         default: ""
 
@@ -21,10 +21,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ------------------------------------------------------------------
-      # Determine upstream release
-      # ------------------------------------------------------------------
-
       - name: Determine upstream tag
         id: tag
         shell: bash
@@ -102,10 +98,6 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      # ------------------------------------------------------------------
-      # Checkout upstream
-      # ------------------------------------------------------------------
-
       - name: Checkout upstream source
         if: steps.check.outputs.skip != 'true'
         uses: actions/checkout@v7
@@ -114,47 +106,22 @@ jobs:
           ref: ${{ steps.tag.outputs.upstream_tag }}
           fetch-depth: 0
 
-      # ------------------------------------------------------------------
-      # Inspect upstream build configuration
-      # ------------------------------------------------------------------
-
       - name: Inspect upstream build configuration
         if: steps.check.outputs.skip != 'true'
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "============================================================"
-          echo "Gradle wrapper"
-          echo "============================================================"
-
           grep '^distributionUrl=' \
             gradle/wrapper/gradle-wrapper.properties || true
-
-          echo
-          echo "============================================================"
-          echo "Version catalog"
-          echo "============================================================"
 
           grep -E \
             '^(agp|kotlin|ksp|firebase-bom|google-services|firebase-crashlytics-plugin|firebase-perf-plugin)[[:space:]]*=' \
             gradle/libs.versions.toml || true
 
-          echo
-          echo "============================================================"
-          echo "F-Droid flavor"
-          echo "============================================================"
-
           grep -n -A12 -B4 \
             'create("fdroid")' \
             app/build.gradle.kts || true
-
-      # ------------------------------------------------------------------
-      # Strip proprietary integrations
-      #
-      # Keep this deliberately narrow. If upstream changes the relevant
-      # Gradle structure, fail rather than silently generating bad Kotlin.
-      # ------------------------------------------------------------------
 
       - name: Strip proprietary components
         if: steps.check.outputs.skip != 'true'
@@ -164,12 +131,6 @@ jobs:
 
           echo "Removing google-services.json..."
           rm -f app/google-services.json
-
-          # --------------------------------------------------------------
-          # Remove proprietary Gradle plugins.
-          # --------------------------------------------------------------
-
-          echo "Removing proprietary Gradle plugin references..."
 
           python3 <<'PY'
           from pathlib import Path
@@ -197,12 +158,6 @@ jobs:
               path.write_text(text)
           PY
 
-          # --------------------------------------------------------------
-          # Remove Firebase flavor dependencies.
-          # --------------------------------------------------------------
-
-          echo "Removing Firebase flavor dependency block..."
-
           python3 <<'PY'
           from pathlib import Path
 
@@ -215,16 +170,6 @@ jobs:
 
           while i < len(lines):
               line = lines[i]
-
-              # Current upstream structure:
-              #
-              # val firebaseFlavors = listOf(
-              #     "github", "beta", "googleplay", ...
-              # )
-              #
-              # firebaseFlavors.forEach { flavor ->
-              #     ...
-              # }
 
               if "val firebaseFlavors = listOf(" in line:
                   found_firebase_block = True
@@ -240,7 +185,6 @@ jobs:
                       )
                       i += 1
 
-                  # Find the associated forEach block.
                   while i < len(lines):
                       if "firebaseFlavors.forEach" in lines[i]:
                           break
@@ -253,7 +197,6 @@ jobs:
                           "but could not find firebaseFlavors.forEach."
                       )
 
-                  # Remove the complete forEach { ... } block.
                   brace_depth = 0
 
                   while i < len(lines):
@@ -284,12 +227,6 @@ jobs:
           path.write_text("".join(output))
           PY
 
-          # --------------------------------------------------------------
-          # Disable Firebase collection placeholders.
-          # --------------------------------------------------------------
-
-          echo "Disabling Firebase collection..."
-
           python3 <<'PY'
           from pathlib import Path
 
@@ -314,13 +251,6 @@ jobs:
 
           path.write_text(text)
           PY
-
-          # --------------------------------------------------------------
-          # Remove direct Firebase references from common source.
-          #
-          # FirebaseHelper already provides the F-Droid no-op abstraction,
-          # so WeatherService must not directly reference Firebase classes.
-          # --------------------------------------------------------------
 
           echo "Removing direct Firebase Analytics dependency from WeatherService..."
 
@@ -361,14 +291,6 @@ jobs:
           path.write_text(text)
           PY
 
-          # --------------------------------------------------------------
-          # Diagnostic: fail early if common F-Droid-compiled source still
-          # directly references Firebase.
-          # --------------------------------------------------------------
-
-          echo
-          echo "Checking common source for direct Firebase references..."
-
           if grep -RniE \
               'com\.google\.firebase|FirebaseAnalytics|FirebaseCrashlytics' \
               app/src/main \
@@ -379,23 +301,11 @@ jobs:
               exit 1
           fi
 
-          echo
-          echo "============================================================"
-          echo "Remaining Firebase/Google references in Gradle files"
-          echo "============================================================"
-
           grep -RniE \
               'firebase|google\.services|crashlytics|performance' \
               build.gradle.kts \
               app/build.gradle.kts \
               || true
-
-          echo
-          echo "Proprietary components stripped."
-
-      # ------------------------------------------------------------------
-      # Configure ABI splits
-      # ------------------------------------------------------------------
 
       - name: Configure ABI splits
         if: steps.check.outputs.skip != 'true'
@@ -416,14 +326,10 @@ jobs:
                   "::error::Could not find 'android {' in app/build.gradle.kts"
               )
 
-          # Do not add the configuration twice if the workflow is ever
-          # adapted to work from a pre-patched checkout.
           if "isUniversalApk = true" in text:
               print("ABI split configuration already exists; leaving it unchanged.")
           else:
               abi_config = '''
-              // FOSS release: generate architecture-specific APKs
-              // plus a universal APK.
               splits {
                   abi {
                       isEnable = true
@@ -451,18 +357,6 @@ jobs:
               print("Added ABI split configuration.")
           PY
 
-          echo
-          echo "ABI targets:"
-          echo "  - armeabi-v7a"
-          echo "  - arm64-v8a"
-          echo "  - x86"
-          echo "  - x86_64"
-          echo "  - universal"
-
-      # ------------------------------------------------------------------
-      # Java / Gradle
-      # ------------------------------------------------------------------
-
       - name: Set up JDK 21
         if: steps.check.outputs.skip != 'true'
         uses: actions/setup-java@v6
@@ -475,10 +369,6 @@ jobs:
         uses: gradle/actions/setup-gradle@v6
         with:
           validate-wrappers: false
-
-      # ------------------------------------------------------------------
-      # Signing
-      # ------------------------------------------------------------------
 
       - name: Decode keystore
         if: steps.check.outputs.skip != 'true'
@@ -523,10 +413,6 @@ jobs:
         env:
           OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
 
-      # ------------------------------------------------------------------
-      # Validate Gradle configuration
-      # ------------------------------------------------------------------
-
       - name: Verify Gradle configuration
         if: steps.check.outputs.skip != 'true'
         shell: bash
@@ -540,10 +426,6 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      # ------------------------------------------------------------------
-      # Build
-      # ------------------------------------------------------------------
-
       - name: Build FOSS Release APKs
         if: steps.check.outputs.skip != 'true'
         shell: bash
@@ -554,10 +436,6 @@ jobs:
             :app:assembleFdroidRelease \
             --no-daemon \
             --stacktrace
-
-      # ------------------------------------------------------------------
-      # Collect APKs
-      # ------------------------------------------------------------------
 
       - name: Prepare APK artifacts
         if: steps.check.outputs.skip != 'true'
@@ -571,11 +449,6 @@ jobs:
           RELEASE_DIR="release-apks"
 
           mkdir -p "$RELEASE_DIR"
-
-          echo "============================================================"
-          echo "APK files produced by Gradle"
-          echo "============================================================"
-
           find "$OUTPUT_DIR" \
             -type f \
             -name "*.apk" \
@@ -583,9 +456,6 @@ jobs:
             | sort
 
           echo
-
-          # Find the actual APKs rather than relying on AGP's exact
-          # output directory/naming convention.
 
           ARM64="$(
             find "$OUTPUT_DIR" \
@@ -675,35 +545,22 @@ jobs:
           cp "$UNIVERSAL" \
             "$RELEASE_DIR/com.neilturner.aerialviews_${RELEASE_TAG}_universal.apk"
 
-          echo
-          echo "============================================================"
-          echo "Release artifacts"
-          echo "============================================================"
-
           ls -lh "$RELEASE_DIR"
 
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
-      # ------------------------------------------------------------------
-      # Create GitHub Release
-      # ------------------------------------------------------------------
-
       - name: Create GitHub Release
         if: steps.check.outputs.skip != 'true'
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
-        with:
-          tag_name: ${{ steps.apk.outputs.release_tag }}
-          name: "${{ steps.tag.outputs.upstream_tag }}"
-          body: |
-            ${{ steps.changelog.outputs.changelog }}
-          files: |
-            release-apks/*.apk
-          draft: false
-          prerelease: false
-
-      # ------------------------------------------------------------------
-      # Cleanup
-      # ------------------------------------------------------------------
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.apk.outputs.release_tag }}
+          RELEASE_NAME: ${{ steps.tag.outputs.upstream_tag }}
+          RELEASE_NOTES: ${{ steps.changelog.outputs.changelog }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            release-apks/*.apk \
+            --title "$RELEASE_NAME" \
+            --notes "$RELEASE_NOTES"
 
       - name: Cleanup secrets
         if: always()
