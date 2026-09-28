@@ -12,7 +12,7 @@
 
 ---
 
-This repository contains an automated workflow to build and release a F-Droid/FOSS variant of the [Aerial Views](https://github.com/theothernt/AerialViews) application.
+This repository contains an automated workflow to build and release an F-Droid/FOSS variant of the [Aerial Views](https://github.com/theothernt/AerialViews) application.
 
 Only proprietary libraries/dependencies are removed, app functionality remains identical. 
 
