@@ -549,6 +549,103 @@ jobs:
 
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
+      - name: Debug release state
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.apk.outputs.release_tag }}
+          RELEASE_NAME: ${{ steps.tag.outputs.upstream_tag }}
+        run: |
+          set -x
+
+          echo "========================================"
+          echo "Release debugging"
+          echo "========================================"
+          echo "Repository:   $GITHUB_REPOSITORY"
+          echo "Workflow:     $GITHUB_WORKFLOW"
+          echo "Run ID:       $GITHUB_RUN_ID"
+          echo "Run number:   $GITHUB_RUN_NUMBER"
+          echo "SHA:          $GITHUB_SHA"
+          echo "Ref:          $GITHUB_REF"
+          echo "Event:        $GITHUB_EVENT_NAME"
+          echo "Actor:        $GITHUB_ACTOR"
+          echo "Release tag:  [$RELEASE_TAG]"
+          echo "Release name: [$RELEASE_NAME]"
+          echo
+
+          echo "========================================"
+          echo "1. Does a GitHub Release exist?"
+          echo "========================================"
+          gh release view "$RELEASE_TAG" --json \
+            name,tagName,isDraft,isPrerelease,publishedAt,createdAt,url,targetCommitish \
+            || echo "NO RELEASE FOUND"
+
+          echo
+
+          echo "========================================"
+          echo "2. Query GitHub API directly"
+          echo "========================================"
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
+            --jq '{
+              id: .id,
+              name: .name,
+              tag_name: .tag_name,
+              draft: .draft,
+              prerelease: .prerelease,
+              created_at: .created_at,
+              published_at: .published_at,
+              target_commitish: .target_commitish,
+              url: .html_url
+            }' \
+            || echo "API: NO RELEASE FOUND FOR THIS TAG"
+
+          echo
+
+          echo "========================================"
+          echo "3. Does the tag exist remotely?"
+          echo "========================================"
+          git ls-remote --tags origin "refs/tags/$RELEASE_TAG"
+
+          echo
+
+          echo "========================================"
+          echo "4. Does GitHub report this tag?"
+          echo "========================================"
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" \
+            --jq '{ref: .ref, sha: .object.sha, type: .object.type}' \
+            || echo "NO GIT TAG FOUND"
+
+          echo
+
+          echo "========================================"
+          echo "5. Releases currently in repository"
+          echo "========================================"
+          gh release list --limit 20
+
+          echo
+
+          echo "========================================"
+          echo "6. Recent workflow runs"
+          echo "========================================"
+          gh run list --workflow "$GITHUB_WORKFLOW" --limit 10
+
+          echo
+
+          echo "========================================"
+          echo "7. Local Git information"
+          echo "========================================"
+          git status --short --branch
+          git tag --list
+          git remote -v
+
+          echo
+
+          echo "========================================"
+          echo "Debug complete"
+          echo "========================================"
+
       - name: Create GitHub Release
         if: steps.check.outputs.skip != 'true'
         env:
