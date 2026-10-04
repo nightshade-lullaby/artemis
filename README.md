@@ -17,5 +17,3 @@ This repository contains an automated workflow to build and release an F-Droid/F
 Only proprietary libraries/dependencies are removed, app functionality remains identical. 
 
 No affiliation with the original author(s).
-
----
